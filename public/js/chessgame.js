@@ -1,11 +1,13 @@
-
 const socket = io()
 const chess = new Chess()
 const boardElement = document.querySelector(".chessboard")
 const roleLabelElement = document.querySelector("#role-label")
 const roleDetailElement = document.querySelector("#role-detail")
-const whiteScoreElement = document.querySelector("#white-score")
-const blackScoreElement = document.querySelector("#black-score")
+const whiteClockElement = document.querySelector("#white-clock")
+const blackClockElement = document.querySelector("#black-clock")
+const whiteClockCard = document.querySelector("#white-clock-card")
+const blackClockCard = document.querySelector("#black-clock-card")
+const gameStatusElement = document.querySelector("#game-status")
 const gameControls = document.querySelector("#game-controls")
 const offerDrawButton = document.querySelector("#offer-draw-button")
 const resignButton = document.querySelector("#resign-button")
@@ -13,7 +15,6 @@ const drawResponse = document.querySelector("#draw-response")
 const drawMessage = document.querySelector("#draw-message")
 const acceptDrawButton = document.querySelector("#accept-draw-button")
 const declineDrawButton = document.querySelector("#decline-draw-button")
-const gameMessage = document.querySelector("#game-message")
 
 let draggedPiece = null
 let sourceSquare = null
@@ -23,6 +24,12 @@ let selectedSquare = null
 let selectedMoves = []
 let gameResult = null
 let drawOfferBy = null
+let noticeText = ""
+
+// Display-only copy of the server clock. The server is the only source of truth;
+// this is just used to count the active clock down smoothly between updates.
+let clockState = { w: 10 * 60 * 1000, b: 10 * 60 * 1000, running: false, active: null }
+let clockReceivedAt = performance.now()
 
 const getSquareName = (row, col) => {
     return `${String.fromCharCode(97 + col)}${8 - row}`
@@ -31,6 +38,37 @@ const getSquareName = (row, col) => {
 const clearSelection = () => {
     selectedSquare = null
     selectedMoves = []
+}
+
+const canPlay = () => Boolean(clockState.running) && !gameResult
+
+const formatClock = ms => {
+    const totalSeconds = Math.max(0, Math.ceil(ms / 1000))
+    const minutes = Math.floor(totalSeconds / 60)
+    const seconds = totalSeconds % 60
+
+    return `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
+}
+
+const renderClocks = () => {
+    const elapsed = clockState.running ? performance.now() - clockReceivedAt : 0
+
+    const remaining = color => {
+        const base = clockState[color]
+        return Math.max(0, clockState.active === color ? base - elapsed : base)
+    }
+
+    whiteClockElement.textContent = formatClock(remaining("w"))
+    blackClockElement.textContent = formatClock(remaining("b"))
+
+    whiteClockCard.classList.toggle(
+        "active",
+        clockState.running && clockState.active === "w"
+    )
+    blackClockCard.classList.toggle(
+        "active",
+        clockState.running && clockState.active === "b"
+    )
 }
 
 const updateRoleDisplay = () => {
@@ -49,9 +87,43 @@ const updateRoleDisplay = () => {
     }
 }
 
-const updateScoreDisplay = scores => {
-    whiteScoreElement.textContent = scores.white ?? 0
-    blackScoreElement.textContent = scores.black ?? 0
+const getStatusText = () => {
+    if (gameResult) {
+        if (gameResult.type === "draw") {
+            return `Game drawn — ${gameResult.reason}.`
+        }
+
+        const winner = gameResult.winner === "w"
+            ? "Player 1 (White)"
+            : "Player 2 (Black)"
+
+        return `${winner} wins — ${gameResult.reason}.`
+    }
+
+    if (drawOfferBy) {
+        if (playerRole && playerRole === drawOfferBy) {
+            return "Draw offer sent. Waiting for your opponent."
+        }
+
+        if (playerRole) {
+            return "Your opponent has offered a draw."
+        }
+
+        return `${drawOfferBy === "w" ? "White" : "Black"} has offered a draw.`
+    }
+
+    if (!clockState.running) {
+        return "Waiting for both players to connect. Clocks are paused."
+    }
+
+    if (noticeText) return noticeText
+
+    return `${chess.turn() === "w" ? "White" : "Black"} to move`
+}
+
+const updateGameStatus = () => {
+    gameStatusElement.textContent = getStatusText()
+    gameStatusElement.classList.toggle("game-over", Boolean(gameResult))
 }
 
 const updateGameControls = () => {
@@ -60,6 +132,7 @@ const updateGameControls = () => {
     const hasOffer = Boolean(drawOfferBy)
     const isOfferer = drawOfferBy === playerRole
 
+    // Only the buttons are player-only. Clocks and status are always visible.
     gameControls.hidden = !isPlayer
 
     offerDrawButton.disabled = isOver || hasOffer
@@ -67,26 +140,13 @@ const updateGameControls = () => {
 
     drawResponse.hidden = isOver || !hasOffer || isOfferer
 
-    if (isOver) {
-        if (gameResult.type === "draw") {
-            gameMessage.textContent = `Game drawn — ${gameResult.reason}.`
-        } else {
-            const winner = gameResult.winner === "w" ? "Player 1" : "Player 2"
-            gameMessage.textContent = `${winner} wins — ${gameResult.reason}.`
-        }
-    } else if (hasOffer && isOfferer) {
-        gameMessage.textContent = "Draw offer sent. Waiting for your opponent."
-    } else if (hasOffer && playerRole && playerRole !== drawOfferBy) {
-        gameMessage.textContent = "Your opponent has offered a draw."
-    } else {
-        gameMessage.textContent = ""
-    }
-
     if (hasOffer && !isOver) {
         drawMessage.textContent = isOfferer
             ? "Waiting for your opponent to respond."
             : "Your opponent offered a draw. Do you accept?"
     }
+
+    updateGameStatus()
 }
 
 const renderBoard = () => {
@@ -135,7 +195,7 @@ const renderBoard = () => {
 
                 pieceElement.innerText = getPieceUnicode(square)
                 pieceElement.draggable =
-                    !gameResult &&
+                    canPlay() &&
                     playerRole === square.color &&
                     chess.turn() === playerRole
 
@@ -183,7 +243,7 @@ const renderBoard = () => {
             squareElement.addEventListener("drop", event => {
                 event.preventDefault()
 
-                if (!draggedPiece || !sourceSquare || gameResult) return
+                if (!draggedPiece || !sourceSquare || !canPlay()) return
 
                 const targetSquare = {
                     row: Number(squareElement.dataset.row),
@@ -208,7 +268,7 @@ const renderBoard = () => {
 }
 
 const handleSquareClick = (row, col) => {
-    if (gameResult || !playerRole || chess.turn() !== playerRole) {
+    if (!canPlay() || !playerRole || chess.turn() !== playerRole) {
         clearSelection()
         renderBoard()
         return
@@ -249,7 +309,7 @@ const handleSquareClick = (row, col) => {
 }
 
 const sendMove = (from, to, promotion = "q") => {
-    if (gameResult) return
+    if (!canPlay()) return
 
     socket.emit("move", { from, to, promotion })
     clearSelection()
@@ -309,22 +369,51 @@ socket.on("boardState", fen => {
     const loaded = chess.load(fen)
 
     if (loaded) {
+        noticeText = ""
         clearSelection()
+        updateGameStatus()
         renderBoard()
     } else {
         console.error("Received an invalid board position from the server.")
     }
 })
 
-socket.on("scoreUpdate", updateScoreDisplay)
+socket.on("clockUpdate", state => {
+    const runningChanged = clockState.running !== state.running
+
+    clockState = {
+        w: state.w,
+        b: state.b,
+        running: Boolean(state.running),
+        active: state.active
+    }
+    clockReceivedAt = performance.now()
+
+    renderClocks()
+
+    if (runningChanged) {
+        // Dragging is only enabled while the clocks run.
+        updateGameControls()
+        renderBoard()
+    } else {
+        updateGameStatus()
+    }
+})
 
 socket.on("gameStatus", status => {
     gameResult = status.result
     drawOfferBy = status.drawOfferBy
 
+    if (gameResult || drawOfferBy) noticeText = ""
+
     clearSelection()
     updateGameControls()
     renderBoard()
+})
+
+socket.on("gameNotice", payload => {
+    noticeText = (payload && payload.message) || ""
+    updateGameStatus()
 })
 
 socket.on("InvalidMove", () => {
@@ -360,6 +449,9 @@ window.addEventListener("beforeunload", event => {
     }
 })
 
+setInterval(renderClocks, 200)
+
 updateRoleDisplay()
 updateGameControls()
+renderClocks()
 renderBoard()

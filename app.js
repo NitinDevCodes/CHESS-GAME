@@ -1,32 +1,90 @@
-
 const express = require("express")
 const socket = require("socket.io")
 const http = require("http")
 const { Chess } = require("chess.js")
 const path = require("path")
+const { performance } = require("perf_hooks")
 
 const app = express()
 const server = http.createServer(app)
 const io = socket(server)
 const chess = new Chess()
 
+// 10 minutes per player. CHESS_CLOCK_MS only exists so timeouts can be tested quickly.
+const INITIAL_TIME_MS = Number(process.env.CHESS_CLOCK_MS) || 10 * 60 * 1000
+const CLOCK_BROADCAST_INTERVAL_MS = 1000
+
 let players = {}
-let scores = { white: 0, black: 0 }
 let drawOfferBy = null
 let gameResult = null
 
-const pieceValues = {
-    p: 1,
-    n: 3,
-    b: 3,
-    r: 5,
-    q: 9
+// Server-authoritative clock. Remaining times are in milliseconds.
+// lastTick uses a monotonic timer so system clock changes cannot affect it.
+const clock = {
+    w: INITIAL_TIME_MS,
+    b: INITIAL_TIME_MS,
+    running: false,
+    active: null,
+    lastTick: null
 }
+
+let timeoutTimer = null
+let broadcastTimer = null
+
+const opposite = color => (color === "w" ? "b" : "w")
+const colorName = color => (color === "w" ? "White" : "Black")
 
 const getColor = socketId => {
     if (socketId === players.white) return "w"
     if (socketId === players.black) return "b"
     return null
+}
+
+const bothPlayersSeated = () => Boolean(players.white && players.black)
+
+/*
+ * Can `color` possibly checkmate the opponent in some sequence of legal moves?
+ * Used for the timeout rule: if the player who did NOT run out of time can never
+ * deliver mate, the game is drawn instead of won.
+ */
+const canDeliverMate = (game, color) => {
+    const own = []
+    let opponentHasPieces = false
+
+    game.board().forEach((row, rowIndex) => {
+        row.forEach((square, colIndex) => {
+            if (!square || square.type === "k") return
+
+            if (square.color === color) {
+                own.push({
+                    type: square.type,
+                    squareColor: (rowIndex + colIndex) % 2
+                })
+            } else {
+                opponentHasPieces = true
+            }
+        })
+    })
+
+    // A pawn can promote; a rook or queen can mate.
+    if (own.some(piece => "pqr".includes(piece.type))) return true
+
+    // Bare king.
+    if (own.length === 0) return false
+
+    // One minor piece can only mate if the opponent has a piece that can
+    // block its own king (a helpmate).
+    if (own.length === 1) return opponentHasPieces
+
+    // Only bishops, all on the same square colour: same situation as one minor piece.
+    const onlyBishops = own.every(piece => piece.type === "b")
+    const sameColourBishops =
+        onlyBishops && own.every(piece => piece.squareColor === own[0].squareColor)
+
+    if (sameColourBishops) return opponentHasPieces
+
+    // Two or more knights, or bishops on opposite colours, etc.: mate is possible.
+    return true
 }
 
 const broadcastGameStatus = () => {
@@ -36,12 +94,118 @@ const broadcastGameStatus = () => {
     })
 }
 
+// Brings the active player's remaining time up to date.
+const syncClock = () => {
+    if (!clock.running) return
+
+    const now = performance.now()
+    const elapsed = Math.max(0, now - clock.lastTick)
+
+    clock[clock.active] = Math.max(0, clock[clock.active] - elapsed)
+    clock.lastTick = now
+}
+
+const getClockSnapshot = () => {
+    syncClock()
+
+    return {
+        w: Math.round(clock.w),
+        b: Math.round(clock.b),
+        running: clock.running,
+        active: clock.running ? clock.active : null
+    }
+}
+
+const broadcastClock = () => {
+    io.emit("clockUpdate", getClockSnapshot())
+}
+
+const clearClockTimers = () => {
+    clearTimeout(timeoutTimer)
+    clearInterval(broadcastTimer)
+    timeoutTimer = null
+    broadcastTimer = null
+}
+
+const stopClock = () => {
+    syncClock()
+
+    clock.running = false
+    clock.active = null
+    clock.lastTick = null
+    clearClockTimers()
+}
+
 const finishGame = result => {
     if (gameResult) return
 
+    stopClock()
     gameResult = result
     drawOfferBy = null
+
+    broadcastClock()
     broadcastGameStatus()
+}
+
+const endOnTime = loser => {
+    if (gameResult) return
+
+    const winner = opposite(loser)
+    clock[loser] = 0
+
+    if (canDeliverMate(chess, winner)) {
+        finishGame({
+            type: "win",
+            winner,
+            reason: `${colorName(loser)} ran out of time`
+        })
+    } else {
+        finishGame({
+            type: "draw",
+            reason: `${colorName(loser)} ran out of time, but ${colorName(winner)} has insufficient material to checkmate`
+        })
+    }
+}
+
+const scheduleTimeout = () => {
+    clearTimeout(timeoutTimer)
+    timeoutTimer = null
+
+    if (!clock.running || gameResult) return
+
+    timeoutTimer = setTimeout(
+        handleTimerFired,
+        Math.max(1, Math.ceil(clock[clock.active]))
+    )
+}
+
+const handleTimerFired = () => {
+    timeoutTimer = null
+
+    if (gameResult || !clock.running) return
+
+    syncClock()
+
+    // Timers can fire slightly early; check the real remaining time.
+    if (clock[clock.active] > 0) {
+        scheduleTimeout()
+        return
+    }
+
+    endOnTime(clock.active)
+}
+
+// Starts (or resumes) the clock only when both player slots are filled.
+const startClock = () => {
+    if (clock.running || gameResult || !bothPlayersSeated()) return
+
+    clock.running = true
+    clock.active = chess.turn()
+    clock.lastTick = performance.now()
+
+    scheduleTimeout()
+    broadcastTimer = setInterval(broadcastClock, CLOCK_BROADCAST_INTERVAL_MS)
+    broadcastClock()
 }
 
 const checkGameEnd = () => {
@@ -74,6 +238,28 @@ const checkGameEnd = () => {
     }
 }
 
+const sanitizeMove = move => {
+    if (!move || typeof move !== "object") return null
+
+    const { from, to, promotion } = move
+    const squarePattern = /^[a-h][1-8]$/
+
+    if (typeof from !== "string" || typeof to !== "string") return null
+    if (!squarePattern.test(from) || !squarePattern.test(to)) return null
+
+    const cleanMove = { from, to }
+
+    if (promotion !== undefined && promotion !== null) {
+        if (typeof promotion !== "string" || !/^[qrbn]$/.test(promotion)) {
+            return null
+        }
+
+        cleanMove.promotion = promotion
+    }
+
+    return cleanMove
+}
+
 app.set("view engine", "ejs")
 app.use(express.static(path.join(__dirname, "public")))
 
@@ -93,45 +279,68 @@ io.on("connection", uniqueSocket => {
     }
 
     uniqueSocket.emit("boardState", chess.fen())
-    uniqueSocket.emit("scoreUpdate", scores)
+    uniqueSocket.emit("clockUpdate", getClockSnapshot())
     uniqueSocket.emit("gameStatus", {
         result: gameResult,
         drawOfferBy
     })
 
+    // Starts the clock if this connection filled the second player slot.
+    startClock()
+
     uniqueSocket.on("move", move => {
-        if (gameResult) return
+        // No moves after the game ends, or while the clocks are paused
+        // (a player slot is empty).
+        if (gameResult || !clock.running) return
 
         const color = getColor(uniqueSocket.id)
-        if (!color || chess.turn() !== color) return
+        if (!color || chess.turn() !== color || clock.active !== color) return
+
+        // Time is checked before the move is applied, so a move that arrives
+        // after the player's time has expired loses on time.
+        syncClock()
+
+        if (clock[color] <= 0) {
+            endOnTime(color)
+            return
+        }
+
+        const cleanMove = sanitizeMove(move)
+
+        if (!cleanMove) {
+            uniqueSocket.emit("InvalidMove")
+            return
+        }
 
         try {
-            const result = chess.move(move)
+            const result = chess.move(cleanMove)
 
             if (!result) {
                 uniqueSocket.emit("InvalidMove")
                 return
             }
-
-            if (result.captured) {
-                const value = pieceValues[result.captured] || 0
-
-                if (result.color === "w") {
-                    scores.white += value
-                } else {
-                    scores.black += value
-                }
-            }
-
-            drawOfferBy = null
-
-            io.emit("boardState", chess.fen())
-            io.emit("scoreUpdate", scores)
-
-            checkGameEnd()
-            broadcastGameStatus()
         } catch (error) {
+            // Invalid move: turn and clocks are left exactly as they were.
             uniqueSocket.emit("InvalidMove")
+            return
+        }
+
+        // Valid move: stop the mover's clock and start the opponent's.
+        syncClock()
+        clock.active = chess.turn()
+        clock.lastTick = performance.now()
+        scheduleTimeout()
+
+        drawOfferBy = null
+
+        io.emit("boardState", chess.fen())
+
+        checkGameEnd()
+
+        // finishGame() already broadcasts clock and status when the game ends.
+        if (!gameResult) {
+            broadcastClock()
+            broadcastGameStatus()
         }
     })
 
@@ -157,6 +366,10 @@ io.on("connection", uniqueSocket => {
             })
         } else if (accept === false) {
             drawOfferBy = null
+
+            io.emit("gameNotice", {
+                message: `${colorName(color)} declined the draw offer.`
+            })
             broadcastGameStatus()
         }
     })
@@ -175,14 +388,30 @@ io.on("connection", uniqueSocket => {
         })
     })
 
-    
     uniqueSocket.on("disconnect", () => {
         const disconnectedColor = getColor(uniqueSocket.id)
+
+        if (!disconnectedColor) return
 
         if (uniqueSocket.id === players.white) {
             delete players.white
         } else if (uniqueSocket.id === players.black) {
             delete players.black
+        }
+
+        if (clock.running) {
+            // Bring the active clock up to date first. If time has already
+            // run out, end the game on time now instead of pausing, so a
+            // disconnect cannot delay or erase the timeout.
+            syncClock()
+
+            if (clock[clock.active] <= 0) {
+                endOnTime(clock.active)
+            } else {
+                // Otherwise pause both clocks while a player slot is empty.
+                stopClock()
+                broadcastClock()
+            }
         }
 
         if (drawOfferBy === disconnectedColor) {

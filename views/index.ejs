@@ -49,7 +49,7 @@
             font-size: 15px;
         }
 
-        .scoreboard {
+        .clock-panel {
             display: flex;
             align-items: stretch;
             justify-content: center;
@@ -58,7 +58,7 @@
             margin-top: 8px;
         }
 
-        .score-card {
+        .clock-card {
             min-width: 150px;
             padding: 12px 18px;
             border: 1px solid #52525b;
@@ -70,27 +70,40 @@
             gap: 4px;
         }
 
-        .score-name {
+        .clock-card.active {
+            border-color: #facc15;
+            box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.35);
+        }
+
+        .clock-name {
             color: #e4e4e7;
             font-size: 14px;
         }
 
-        .score-value {
-            font-size: 24px;
+        .clock-value {
+            font-size: 28px;
             font-weight: 700;
-            color: #facc15;
+            color: #ffffff;
             font-variant-numeric: tabular-nums;
         }
 
-        .score-unit {
-            color: #a1a1aa;
-            font-size: 12px;
+        #game-status {
+            width: min(480px, 92vw);
+            min-height: 1.4em;
+            margin: 4px 0 0;
+            color: #e4e4e7;
+            font-size: 15px;
+            text-align: center;
         }
 
-        .score-description {
-            margin: 0;
-            color: #a1a1aa;
-            font-size: 12px;
+        #game-status.game-over {
+            padding: 10px 14px;
+            border: 1px solid #facc15;
+            border-radius: 10px;
+            background: #27272a;
+            color: #facc15;
+            font-size: 20px;
+            font-weight: 700;
         }
 
         .chessboard {
@@ -228,13 +241,6 @@
             text-align: center;
         }
 
-        #game-message {
-            margin: 0;
-            color: #e4e4e7;
-            font-size: 14px;
-            text-align: center;
-        }
-
         [hidden] {
             display: none !important;
         }
@@ -246,23 +252,23 @@
             <h1 id="role-label">Connecting...</h1>
             <p id="role-detail">Connecting to the chess game</p>
 
-            <section class="scoreboard" aria-label="Captured material score">
-                <div class="score-card">
-                    <span class="score-name">Player 1 · White</span>
-                    <strong class="score-value" id="white-score">0</strong>
-                    <span class="score-unit">points</span>
+            <!-- Visible to players and spectators -->
+            <section class="clock-panel" aria-label="Chess clocks">
+                <div class="clock-card" id="white-clock-card">
+                    <span class="clock-name">Player 1 · White</span>
+                    <strong class="clock-value" id="white-clock">10:00</strong>
                 </div>
 
-                <div class="score-card">
-                    <span class="score-name">Player 2 · Black</span>
-                    <strong class="score-value" id="black-score">0</strong>
-                    <span class="score-unit">points</span>
+                <div class="clock-card" id="black-clock-card">
+                    <span class="clock-name">Player 2 · Black</span>
+                    <strong class="clock-value" id="black-clock">10:00</strong>
                 </div>
             </section>
 
-            <p class="score-description">
-                Material points are awarded for captured pieces.
-            </p>
+            <!-- Shared status and result: visible to players and spectators -->
+            <p id="game-status" role="status" aria-live="polite"></p>
+
+            <!-- Player-only buttons -->
             <section id="game-controls" class="game-controls" hidden>
                 <div class="game-actions">
                     <button id="offer-draw-button" type="button">
@@ -284,8 +290,6 @@
                         </button>
                     </div>
                 </div>
-
-                <p id="game-message" role="status" aria-live="polite"></p>
             </section>
         </header>
 
