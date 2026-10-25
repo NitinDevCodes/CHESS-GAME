@@ -178,6 +178,66 @@
         .flipped .piece {
             transform: rotate(180deg);
         }
+        .game-controls {
+            width: min(400px, 92vw);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 12px;
+            margin-top: 12px;
+        }
+
+        .game-actions {
+            display: flex;
+            justify-content: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+
+        .game-actions button {
+            padding: 10px 16px;
+            border: 1px solid #52525b;
+            border-radius: 8px;
+            background: #27272a;
+            color: #ffffff;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+        }
+
+        .game-actions button:hover:not(:disabled) {
+            background: #3f3f46;
+        }
+
+        .game-actions button:disabled {
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        #resign-button {
+            border-color: #b91c1c;
+            background: #991b1b;
+        }
+
+        #resign-button:hover:not(:disabled) {
+            background: #b91c1c;
+        }
+
+        #draw-response {
+            width: 100%;
+            text-align: center;
+        }
+
+        #game-message {
+            margin: 0;
+            color: #e4e4e7;
+            font-size: 14px;
+            text-align: center;
+        }
+
+        [hidden] {
+            display: none !important;
+        }
     </style>
 </head>
 <body>
@@ -203,6 +263,30 @@
             <p class="score-description">
                 Material points are awarded for captured pieces.
             </p>
+            <section id="game-controls" class="game-controls" hidden>
+                <div class="game-actions">
+                    <button id="offer-draw-button" type="button">
+                        Offer Draw
+                    </button>
+                    <button id="resign-button" type="button">
+                        Resign
+                    </button>
+                </div>
+
+                <div id="draw-response" hidden>
+                    <p id="draw-message">Your opponent offered a draw.</p>
+                    <div class="game-actions">
+                        <button id="accept-draw-button" type="button">
+                            Accept Draw
+                        </button>
+                        <button id="decline-draw-button" type="button">
+                            Decline Draw
+                        </button>
+                    </div>
+                </div>
+
+                <p id="game-message" role="status" aria-live="polite"></p>
+            </section>
         </header>
 
         <div class="chessboard bg-red-800" aria-label="Chessboard"></div>

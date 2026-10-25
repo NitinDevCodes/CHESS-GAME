@@ -1,3 +1,4 @@
+
 const socket = io()
 const chess = new Chess()
 const boardElement = document.querySelector(".chessboard")
@@ -5,6 +6,14 @@ const roleLabelElement = document.querySelector("#role-label")
 const roleDetailElement = document.querySelector("#role-detail")
 const whiteScoreElement = document.querySelector("#white-score")
 const blackScoreElement = document.querySelector("#black-score")
+const gameControls = document.querySelector("#game-controls")
+const offerDrawButton = document.querySelector("#offer-draw-button")
+const resignButton = document.querySelector("#resign-button")
+const drawResponse = document.querySelector("#draw-response")
+const drawMessage = document.querySelector("#draw-message")
+const acceptDrawButton = document.querySelector("#accept-draw-button")
+const declineDrawButton = document.querySelector("#decline-draw-button")
+const gameMessage = document.querySelector("#game-message")
 
 let draggedPiece = null
 let sourceSquare = null
@@ -12,6 +21,8 @@ let playerRole = null
 let roleAssigned = false
 let selectedSquare = null
 let selectedMoves = []
+let gameResult = null
+let drawOfferBy = null
 
 const getSquareName = (row, col) => {
     return `${String.fromCharCode(97 + col)}${8 - row}`
@@ -38,9 +49,44 @@ const updateRoleDisplay = () => {
     }
 }
 
-const updateScoreDisplay = (scoreState) => {
-    whiteScoreElement.textContent = scoreState.white ?? 0
-    blackScoreElement.textContent = scoreState.black ?? 0
+const updateScoreDisplay = scores => {
+    whiteScoreElement.textContent = scores.white ?? 0
+    blackScoreElement.textContent = scores.black ?? 0
+}
+
+const updateGameControls = () => {
+    const isPlayer = playerRole === "w" || playerRole === "b"
+    const isOver = Boolean(gameResult)
+    const hasOffer = Boolean(drawOfferBy)
+    const isOfferer = drawOfferBy === playerRole
+
+    gameControls.hidden = !isPlayer
+
+    offerDrawButton.disabled = isOver || hasOffer
+    resignButton.disabled = isOver
+
+    drawResponse.hidden = isOver || !hasOffer || isOfferer
+
+    if (isOver) {
+        if (gameResult.type === "draw") {
+            gameMessage.textContent = `Game drawn — ${gameResult.reason}.`
+        } else {
+            const winner = gameResult.winner === "w" ? "Player 1" : "Player 2"
+            gameMessage.textContent = `${winner} wins — ${gameResult.reason}.`
+        }
+    } else if (hasOffer && isOfferer) {
+        gameMessage.textContent = "Draw offer sent. Waiting for your opponent."
+    } else if (hasOffer && playerRole && playerRole !== drawOfferBy) {
+        gameMessage.textContent = "Your opponent has offered a draw."
+    } else {
+        gameMessage.textContent = ""
+    }
+
+    if (hasOffer && !isOver) {
+        drawMessage.textContent = isOfferer
+            ? "Waiting for your opponent to respond."
+            : "Your opponent offered a draw. Do you accept?"
+    }
 }
 
 const renderBoard = () => {
@@ -88,8 +134,8 @@ const renderBoard = () => {
                 )
 
                 pieceElement.innerText = getPieceUnicode(square)
-
                 pieceElement.draggable =
+                    !gameResult &&
                     playerRole === square.color &&
                     chess.turn() === playerRole
 
@@ -98,7 +144,7 @@ const renderBoard = () => {
                     `${square.color === "w" ? "White" : "Black"} ${square.type}`
                 )
 
-                pieceElement.addEventListener("dragstart", (event) => {
+                pieceElement.addEventListener("dragstart", event => {
                     if (!pieceElement.draggable) {
                         event.preventDefault()
                         return
@@ -107,7 +153,6 @@ const renderBoard = () => {
                     draggedPiece = pieceElement
                     sourceSquare = { row: rowindex, col: squareindex }
                     selectedSquare = squareName
-
                     selectedMoves = chess.moves({
                         square: squareName,
                         verbose: true
@@ -130,18 +175,15 @@ const renderBoard = () => {
                 handleSquareClick(rowindex, squareindex)
             })
 
-            squareElement.addEventListener("dragover", (event) => {
+            squareElement.addEventListener("dragover", event => {
                 event.preventDefault()
-
-                if (draggedPiece) {
-                    event.dataTransfer.dropEffect = "move"
-                }
+                if (draggedPiece) event.dataTransfer.dropEffect = "move"
             })
 
-            squareElement.addEventListener("drop", (event) => {
+            squareElement.addEventListener("drop", event => {
                 event.preventDefault()
 
-                if (!draggedPiece || !sourceSquare) return
+                if (!draggedPiece || !sourceSquare || gameResult) return
 
                 const targetSquare = {
                     row: Number(squareElement.dataset.row),
@@ -166,7 +208,7 @@ const renderBoard = () => {
 }
 
 const handleSquareClick = (row, col) => {
-    if (!playerRole || chess.turn() !== playerRole) {
+    if (gameResult || !playerRole || chess.turn() !== playerRole) {
         clearSelection()
         renderBoard()
         return
@@ -194,7 +236,6 @@ const handleSquareClick = (row, col) => {
             clearSelection()
         } else {
             selectedSquare = targetSquare
-
             selectedMoves = chess.moves({
                 square: selectedSquare,
                 verbose: true
@@ -208,20 +249,22 @@ const handleSquareClick = (row, col) => {
 }
 
 const sendMove = (from, to, promotion = "q") => {
-    socket.emit("move", { from, to, promotion })
+    if (gameResult) return
 
+    socket.emit("move", { from, to, promotion })
     clearSelection()
     renderBoard()
 }
 
 const handleMove = (source, target) => {
-    const from = getSquareName(source.row, source.col)
-    const to = getSquareName(target.row, target.col)
-
-    sendMove(from, to, "q")
+    sendMove(
+        getSquareName(source.row, source.col),
+        getSquareName(target.row, target.col),
+        "q"
+    )
 }
 
-const getPieceUnicode = (piece) => {
+const getPieceUnicode = piece => {
     const unicodePieces = {
         w: {
             p: "♙",
@@ -244,11 +287,11 @@ const getPieceUnicode = (piece) => {
     return unicodePieces[piece.color][piece.type] || ""
 }
 
-socket.on("playerRole", (role) => {
+socket.on("playerRole", role => {
     playerRole = role
     roleAssigned = true
-
     updateRoleDisplay()
+    updateGameControls()
     clearSelection()
     renderBoard()
 })
@@ -256,13 +299,13 @@ socket.on("playerRole", (role) => {
 socket.on("spectatorRole", () => {
     playerRole = null
     roleAssigned = true
-
     updateRoleDisplay()
+    updateGameControls()
     clearSelection()
     renderBoard()
 })
 
-socket.on("boardState", (fen) => {
+socket.on("boardState", fen => {
     const loaded = chess.load(fen)
 
     if (loaded) {
@@ -273,13 +316,50 @@ socket.on("boardState", (fen) => {
     }
 })
 
-socket.on("scoreUpdate", (scoreState) => {
-    updateScoreDisplay(scoreState)
+socket.on("scoreUpdate", updateScoreDisplay)
+
+socket.on("gameStatus", status => {
+    gameResult = status.result
+    drawOfferBy = status.drawOfferBy
+
+    clearSelection()
+    updateGameControls()
+    renderBoard()
 })
 
 socket.on("InvalidMove", () => {
     console.warn("The server rejected that move.")
 })
 
+offerDrawButton.addEventListener("click", () => {
+    if (!gameResult) socket.emit("offerDraw")
+})
+
+acceptDrawButton.addEventListener("click", () => {
+    if (!gameResult) socket.emit("respondDraw", true)
+})
+
+declineDrawButton.addEventListener("click", () => {
+    if (!gameResult) socket.emit("respondDraw", false)
+})
+
+resignButton.addEventListener("click", () => {
+    if (gameResult) return
+
+    const confirmed = window.confirm(
+        "Are you sure you want to resign? Your opponent will win."
+    )
+
+    if (confirmed) socket.emit("resign")
+})
+
+window.addEventListener("beforeunload", event => {
+    if (roleAssigned && playerRole && !gameResult) {
+        event.preventDefault()
+        event.returnValue = ""
+    }
+})
+
 updateRoleDisplay()
+updateGameControls()
 renderBoard()
