@@ -1,226 +1,225 @@
-const socket = io();
-const chess = new Chess();
-const boardElement = document.querySelector(".chessboard");
+const socket = io()
+const chess = new Chess()
+const boardElement = document.querySelector(".chessboard")
+const roleLabelElement = document.querySelector("#role-label")
+const roleDetailElement = document.querySelector("#role-detail")
+const whiteScoreElement = document.querySelector("#white-score")
+const blackScoreElement = document.querySelector("#black-score")
 
-let draggedPiece = null;
-let sourceSquare = null;
-let playerRole = null;
-
-let selectedSquare = null;
-let selectedMoves = [];
+let draggedPiece = null
+let sourceSquare = null
+let playerRole = null
+let roleAssigned = false
+let selectedSquare = null
+let selectedMoves = []
 
 const getSquareName = (row, col) => {
-    return `${String.fromCharCode(97 + col)}${8 - row}`;
-};
+    return `${String.fromCharCode(97 + col)}${8 - row}`
+}
 
 const clearSelection = () => {
-    selectedSquare = null;
-    selectedMoves = [];
-};
+    selectedSquare = null
+    selectedMoves = []
+}
+
+const updateRoleDisplay = () => {
+    if (!roleAssigned) {
+        roleLabelElement.textContent = "Connecting..."
+        roleDetailElement.textContent = "Connecting to the chess game"
+    } else if (playerRole === "w") {
+        roleLabelElement.textContent = "Player 1"
+        roleDetailElement.textContent = "Playing as White"
+    } else if (playerRole === "b") {
+        roleLabelElement.textContent = "Player 2"
+        roleDetailElement.textContent = "Playing as Black"
+    } else {
+        roleLabelElement.textContent = "Spectator"
+        roleDetailElement.textContent = "Watching the game"
+    }
+}
+
+const updateScoreDisplay = (scoreState) => {
+    whiteScoreElement.textContent = scoreState.white ?? 0
+    blackScoreElement.textContent = scoreState.black ?? 0
+}
 
 const renderBoard = () => {
-    const board = chess.board();
-    boardElement.innerHTML = "";
+    const board = chess.board()
+    boardElement.innerHTML = ""
 
     const possibleTargets = new Map(
         selectedMoves.map(move => [move.to, move])
-    );
+    )
 
     board.forEach((row, rowindex) => {
         row.forEach((square, squareindex) => {
-            const squareName = getSquareName(
-                rowindex,
-                squareindex
-            );
-
-            const squareElement = document.createElement("div");
+            const squareName = getSquareName(rowindex, squareindex)
+            const squareElement = document.createElement("div")
 
             squareElement.classList.add(
                 "square",
-                (rowindex + squareindex) % 2 === 0
-                    ? "light"
-                    : "dark"
-            );
+                (rowindex + squareindex) % 2 === 0 ? "light" : "dark"
+            )
 
-            squareElement.dataset.row = rowindex;
-            squareElement.dataset.col = squareindex;
-            squareElement.dataset.square = squareName;
+            squareElement.dataset.row = rowindex
+            squareElement.dataset.col = squareindex
+            squareElement.dataset.square = squareName
 
             if (squareName === selectedSquare) {
-                squareElement.classList.add("selected");
+                squareElement.classList.add("selected")
             }
 
-            const targetMove = possibleTargets.get(squareName);
+            const targetMove = possibleTargets.get(squareName)
 
             if (targetMove) {
-                const isCapture =
-                    Boolean(targetMove.captured) ||
-                    targetMove.flags.includes("e");
-
                 squareElement.classList.add(
-                    isCapture
+                    targetMove.captured || targetMove.flags.includes("e")
                         ? "possible-capture"
                         : "possible-move"
-                );
+                )
             }
 
-            // Render a piece if the square is occupied.
             if (square) {
-                const pieceElement = document.createElement("div");
+                const pieceElement = document.createElement("div")
 
                 pieceElement.classList.add(
                     "piece",
                     square.color === "w" ? "white" : "black"
-                );
+                )
 
-                pieceElement.innerText = getPieceUnicode(square);
+                pieceElement.innerText = getPieceUnicode(square)
 
                 pieceElement.draggable =
                     playerRole === square.color &&
-                    chess.turn() === playerRole;
+                    chess.turn() === playerRole
 
                 pieceElement.setAttribute(
                     "aria-label",
                     `${square.color === "w" ? "White" : "Black"} ${square.type}`
-                );
+                )
 
                 pieceElement.addEventListener("dragstart", (event) => {
                     if (!pieceElement.draggable) {
-                        event.preventDefault();
-                        return;
+                        event.preventDefault()
+                        return
                     }
 
-                    draggedPiece = pieceElement;
+                    draggedPiece = pieceElement
+                    sourceSquare = { row: rowindex, col: squareindex }
+                    selectedSquare = squareName
 
-                    sourceSquare = {
-                        row: rowindex,
-                        col: squareindex
-                    };
+                    selectedMoves = chess.moves({
+                        square: squareName,
+                        verbose: true
+                    })
 
-                    event.dataTransfer.setData(
-                        "text/plain",
-                        squareName
-                    );
-
-                    event.dataTransfer.effectAllowed = "move";
-                });
+                    event.dataTransfer.setData("text/plain", squareName)
+                    event.dataTransfer.effectAllowed = "move"
+                })
 
                 pieceElement.addEventListener("dragend", () => {
-                    draggedPiece = null;
-                    sourceSquare = null;
-                });
+                    draggedPiece = null
+                    sourceSquare = null
+                    renderBoard()
+                })
 
-                squareElement.appendChild(pieceElement);
+                squareElement.append(pieceElement)
             }
 
             squareElement.addEventListener("click", () => {
-                handleSquareClick(rowindex, squareindex);
-            });
+                handleSquareClick(rowindex, squareindex)
+            })
 
             squareElement.addEventListener("dragover", (event) => {
-                event.preventDefault();
+                event.preventDefault()
 
                 if (draggedPiece) {
-                    event.dataTransfer.dropEffect = "move";
+                    event.dataTransfer.dropEffect = "move"
                 }
-            });
+            })
 
             squareElement.addEventListener("drop", (event) => {
-                event.preventDefault();
+                event.preventDefault()
 
-                if (!draggedPiece || !sourceSquare) {
-                    return;
-                }
+                if (!draggedPiece || !sourceSquare) return
 
                 const targetSquare = {
                     row: Number(squareElement.dataset.row),
                     col: Number(squareElement.dataset.col)
-                };
+                }
 
-                handleMove(sourceSquare, targetSquare);
+                handleMove(sourceSquare, targetSquare)
 
-                draggedPiece = null;
-                sourceSquare = null;
-            });
+                draggedPiece = null
+                sourceSquare = null
+            })
 
-            boardElement.appendChild(squareElement);
-        });
-    });
+            boardElement.appendChild(squareElement)
+        })
+    })
 
     if (playerRole === "b") {
-        boardElement.classList.add("flipped");
+        boardElement.classList.add("flipped")
     } else {
-        boardElement.classList.remove("flipped");
+        boardElement.classList.remove("flipped")
     }
-};
+}
 
 const handleSquareClick = (row, col) => {
     if (!playerRole || chess.turn() !== playerRole) {
-        clearSelection();
-        renderBoard();
-        return;
+        clearSelection()
+        renderBoard()
+        return
     }
 
-    const targetSquare = getSquareName(row, col);
+    const targetSquare = getSquareName(row, col)
 
     const selectedMove = selectedMoves.find(
         move => move.to === targetSquare
-    );
+    )
 
     if (selectedSquare && selectedMove) {
         sendMove(
             selectedSquare,
             targetSquare,
             selectedMove.promotion || "q"
-        );
-
-        return;
+        )
+        return
     }
 
-    const piece = chess.get(targetSquare);
+    const piece = chess.get(targetSquare)
 
     if (piece && piece.color === playerRole) {
         if (selectedSquare === targetSquare) {
-            clearSelection();
+            clearSelection()
         } else {
-            selectedSquare = targetSquare;
+            selectedSquare = targetSquare
 
             selectedMoves = chess.moves({
                 square: selectedSquare,
                 verbose: true
-            });
+            })
         }
     } else {
-        clearSelection();
+        clearSelection()
     }
 
-    renderBoard();
-};
+    renderBoard()
+}
 
 const sendMove = (from, to, promotion = "q") => {
-    socket.emit("move", {
-        from,
-        to,
-        promotion
-    });
+    socket.emit("move", { from, to, promotion })
 
-    clearSelection();
-    renderBoard();
-};
+    clearSelection()
+    renderBoard()
+}
 
 const handleMove = (source, target) => {
-    const from = getSquareName(
-        source.row,
-        source.col
-    );
+    const from = getSquareName(source.row, source.col)
+    const to = getSquareName(target.row, target.col)
 
-    const to = getSquareName(
-        target.row,
-        target.col
-    );
-
-    sendMove(from, to, "q");
-};
+    sendMove(from, to, "q")
+}
 
 const getPieceUnicode = (piece) => {
     const unicodePieces = {
@@ -240,40 +239,47 @@ const getPieceUnicode = (piece) => {
             q: "♛",
             k: "♚"
         }
-    };
+    }
 
-    return unicodePieces[piece.color][piece.type] || "";
-};
+    return unicodePieces[piece.color][piece.type] || ""
+}
 
 socket.on("playerRole", (role) => {
-    playerRole = role;
+    playerRole = role
+    roleAssigned = true
 
-    clearSelection();
-    renderBoard();
-});
+    updateRoleDisplay()
+    clearSelection()
+    renderBoard()
+})
 
 socket.on("spectatorRole", () => {
-    playerRole = null;
+    playerRole = null
+    roleAssigned = true
 
-    clearSelection();
-    renderBoard();
-});
+    updateRoleDisplay()
+    clearSelection()
+    renderBoard()
+})
 
 socket.on("boardState", (fen) => {
-    const loaded = chess.load(fen);
+    const loaded = chess.load(fen)
 
     if (loaded) {
-        clearSelection();
-        renderBoard();
+        clearSelection()
+        renderBoard()
     } else {
-        console.error(
-            "Received an invalid board position from the server."
-        );
+        console.error("Received an invalid board position from the server.")
     }
-});
+})
+
+socket.on("scoreUpdate", (scoreState) => {
+    updateScoreDisplay(scoreState)
+})
 
 socket.on("InvalidMove", () => {
-    console.warn("The server rejected that move.");
-});
+    console.warn("The server rejected that move.")
+})
 
-renderBoard();
+updateRoleDisplay()
+renderBoard()
