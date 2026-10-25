@@ -3,15 +3,20 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
     <title>Chess Game</title>
+
     <script src="https://cdn.tailwindcss.com"></script>
+
     <style>
         .chessboard {
             display: grid;
             grid-template-columns: repeat(8, minmax(0, 1fr));
             grid-template-rows: repeat(8, minmax(0, 1fr));
+
             width: 400px;
             height: 400px;
+
             transform: rotate(0deg);
         }
 
@@ -29,9 +34,50 @@
         }
 
         .square {
+            position: relative;
+
             display: flex;
             align-items: center;
             justify-content: center;
+
+            overflow: hidden;
+            cursor: pointer;
+        }
+
+        .square.selected {
+            box-shadow: inset 0 0 0 4px
+                rgba(250, 204, 21, 0.95);
+        }
+
+        .square.possible-move::after {
+            content: "";
+
+            position: absolute;
+
+            width: 24%;
+            height: 24%;
+
+            border-radius: 50%;
+
+            background: rgba(22, 101, 52, 0.58);
+
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .square.possible-capture::after {
+            content: "";
+
+            position: absolute;
+            inset: 6%;
+
+            border: 5px solid rgba(22, 101, 52, 0.62);
+            border-radius: 50%;
+
+            box-sizing: border-box;
+
+            pointer-events: none;
+            z-index: 0;
         }
 
         .square.light {
@@ -43,8 +89,13 @@
         }
 
         .piece {
+            position: relative;
+            z-index: 1;
+
             font-size: 36px;
             cursor: pointer;
+
+            user-select: none;
         }
 
         .piece.draggable {
@@ -55,21 +106,26 @@
             opacity: 0.5;
         }
 
-        /* Rotate pieces for black player */
         .flipped .piece {
             transform: rotate(180deg);
         }
     </style>
 </head>
+
 <body>
     <div class="w-full h-screen flex items-center justify-center bg-zinc-900">
         <div class="chessboard w-96 h-96 bg-red-800"></div>
     </div>
 
     <script src="/socket.io/socket.io.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js" 
-        integrity="sha512-xRllwz2gdZciIB+AkEbeq+gVhX8VB8XsfqeFbUh+SzHlN96dEduwtTuVuc2u9EROlmW9+yhRlxjif66ORpsgVA==" 
-        crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+    <script
+        src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.3/chess.min.js"
+        integrity="sha512-xRllwz2gdZciIB+AkEbeq+gVhX8VB8XsfqeFbUh+SzHlN96dEduwtTuVuc2u9EROlmW9+yhRlxjif66ORpsgVA=="
+        crossorigin="anonymous"
+        referrerpolicy="no-referrer">
+    </script>
+
     <script src="/js/chessgame.js"></script>
 </body>
 </html>
