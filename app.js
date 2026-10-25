@@ -10,16 +10,23 @@ const server = http.createServer(app)
 const io = socket(server)
 const chess = new Chess()
 
-// 10 minutes per player. CHESS_CLOCK_MS only exists so timeouts can be tested quickly.
 const INITIAL_TIME_MS = Number(process.env.CHESS_CLOCK_MS) || 10 * 60 * 1000
 const CLOCK_BROADCAST_INTERVAL_MS = 1000
+
+const RESET_DELAY_MS = Number(process.env.CHESS_RESET_DELAY_MS) || 10 * 1000
+
+const SEAT_KEYS = { w: "white", b: "black" }
 
 let players = {}
 let drawOfferBy = null
 let gameResult = null
 
-// Server-authoritative clock. Remaining times are in milliseconds.
-// lastTick uses a monotonic timer so system clock changes cannot affect it.
+const seatSockets = { w: null, b: null }
+const seatOwners = { w: null, b: null }
+const pendingResets = { w: null, b: null }
+
+let gameGeneration = 0
+
 const clock = {
     w: INITIAL_TIME_MS,
     b: INITIAL_TIME_MS,
@@ -41,6 +48,16 @@ const getColor = socketId => {
 }
 
 const bothPlayersSeated = () => Boolean(players.white && players.black)
+
+// The persistent id the browser keeps in sessionStorage and sends when connecting.
+const getPlayerId = uniqueSocket => {
+    const query = uniqueSocket.handshake && uniqueSocket.handshake.query
+    const raw = query && query.playerId
+
+    return typeof raw === "string" && /^[A-Za-z0-9_-]{8,64}$/.test(raw)
+        ? raw
+        : null
+}
 
 /*
  * Can `color` possibly checkmate the opponent in some sequence of legal moves?
@@ -87,11 +104,31 @@ const canDeliverMate = (game, color) => {
     return true
 }
 
+// Describes the earliest pending reset so every client can show a countdown.
+const getPendingResetInfo = () => {
+    const records = ["w", "b"].map(color => pendingResets[color]).filter(Boolean)
+
+    if (records.length === 0) return null
+
+    const now = performance.now()
+
+    return {
+        colors: records.map(record => record.color),
+        inMs: Math.max(
+            0,
+            Math.round(Math.min(...records.map(record => record.deadline - now)))
+        )
+    }
+}
+
+const getGameStatus = () => ({
+    result: gameResult,
+    drawOfferBy,
+    pendingReset: getPendingResetInfo()
+})
+
 const broadcastGameStatus = () => {
-    io.emit("gameStatus", {
-        result: gameResult,
-        drawOfferBy
-    })
+    io.emit("gameStatus", getGameStatus())
 }
 
 // Brings the active player's remaining time up to date.
@@ -173,13 +210,18 @@ const scheduleTimeout = () => {
 
     if (!clock.running || gameResult) return
 
+    const generation = gameGeneration
+
     timeoutTimer = setTimeout(
-        handleTimerFired,
+        () => handleTimerFired(generation),
         Math.max(1, Math.ceil(clock[clock.active]))
     )
 }
 
-const handleTimerFired = () => {
+const handleTimerFired = generation => {
+    // A timer from before a reset must never touch the new game.
+    if (generation !== gameGeneration) return
+
     timeoutTimer = null
 
     if (gameResult || !clock.running) return
@@ -260,6 +302,104 @@ const sanitizeMove = move => {
     return cleanMove
 }
 
+
+const cancelPendingReset = color => {
+    const record = pendingResets[color]
+
+    if (!record) return false
+
+    clearTimeout(record.timer)
+    pendingResets[color] = null
+
+    return true
+}
+
+const cancelAllPendingResets = () => {
+    cancelPendingReset("w")
+    cancelPendingReset("b")
+}
+
+const resetGame = () => {
+    gameGeneration += 1
+    cancelAllPendingResets()
+    stopClock()
+
+    chess.reset()
+
+    clock.w = INITIAL_TIME_MS
+    clock.b = INITIAL_TIME_MS
+    gameResult = null
+    drawOfferBy = null
+
+    ;["w", "b"].forEach(color => {
+        if (!seatSockets[color]) {
+            seatOwners[color] = null
+            delete players[SEAT_KEYS[color]]
+        }
+    })
+
+    io.emit("boardState", chess.fen())
+    io.emit("clockUpdate", getClockSnapshot())
+    broadcastGameStatus()
+    io.emit("gameNotice", {
+        message: "The game was reset because a player did not reconnect in time."
+    })
+
+    startClock()
+}
+
+const startPendingReset = color => {
+    cancelPendingReset(color)
+
+    const record = {
+        color,
+        generation: gameGeneration,
+        deadline: performance.now() + RESET_DELAY_MS,
+        timer: null
+    }
+
+    record.timer = setTimeout(() => {
+        if (pendingResets[color] !== record) return
+        if (record.generation !== gameGeneration) return
+
+        resetGame()
+    }, RESET_DELAY_MS)
+
+    pendingResets[color] = record
+}
+
+const claimSeat = (uniqueSocket, playerId) => {
+    if (playerId) {
+        for (const color of ["w", "b"]) {
+            if (seatOwners[color] !== playerId) continue
+
+            const previousSocket = seatSockets[color]
+            const cancelled = cancelPendingReset(color)
+
+            players[SEAT_KEYS[color]] = uniqueSocket.id
+            seatSockets[color] = uniqueSocket
+
+            if (previousSocket && previousSocket.id !== uniqueSocket.id) {
+                previousSocket.disconnect(true)
+            }
+
+            return { color, reclaimed: cancelled || Boolean(previousSocket) }
+        }
+    }
+
+    for (const color of ["w", "b"]) {
+        if (!players[SEAT_KEYS[color]] && !pendingResets[color]) {
+            players[SEAT_KEYS[color]] = uniqueSocket.id
+            seatSockets[color] = uniqueSocket
+            seatOwners[color] = playerId
+
+            return { color, reclaimed: false }
+        }
+    }
+
+    return { color: null, reclaimed: false }
+}
+
 app.set("view engine", "ejs")
 app.use(express.static(path.join(__dirname, "public")))
 
@@ -268,36 +408,34 @@ app.get("/", (req, res) => {
 })
 
 io.on("connection", uniqueSocket => {
-    if (!players.white) {
-        players.white = uniqueSocket.id
-        uniqueSocket.emit("playerRole", "w")
-    } else if (!players.black) {
-        players.black = uniqueSocket.id
-        uniqueSocket.emit("playerRole", "b")
+    const { color: seatColor, reclaimed } = claimSeat(
+        uniqueSocket,
+        getPlayerId(uniqueSocket)
+    )
+
+    if (seatColor) {
+        uniqueSocket.emit("playerRole", seatColor)
     } else {
         uniqueSocket.emit("spectatorRole")
     }
 
     uniqueSocket.emit("boardState", chess.fen())
     uniqueSocket.emit("clockUpdate", getClockSnapshot())
-    uniqueSocket.emit("gameStatus", {
-        result: gameResult,
-        drawOfferBy
-    })
 
-    // Starts the clock if this connection filled the second player slot.
+    if (reclaimed) {
+        broadcastGameStatus()
+    } else {
+        uniqueSocket.emit("gameStatus", getGameStatus())
+    }
+
     startClock()
 
     uniqueSocket.on("move", move => {
-        // No moves after the game ends, or while the clocks are paused
-        // (a player slot is empty).
         if (gameResult || !clock.running) return
 
         const color = getColor(uniqueSocket.id)
         if (!color || chess.turn() !== color || clock.active !== color) return
 
-        // Time is checked before the move is applied, so a move that arrives
-        // after the player's time has expired loses on time.
         syncClock()
 
         if (clock[color] <= 0) {
@@ -320,12 +458,10 @@ io.on("connection", uniqueSocket => {
                 return
             }
         } catch (error) {
-            // Invalid move: turn and clocks are left exactly as they were.
             uniqueSocket.emit("InvalidMove")
             return
         }
 
-        // Valid move: stop the mover's clock and start the opponent's.
         syncClock()
         clock.active = chess.turn()
         clock.lastTick = performance.now()
@@ -337,7 +473,6 @@ io.on("connection", uniqueSocket => {
 
         checkGameEnd()
 
-        // finishGame() already broadcasts clock and status when the game ends.
         if (!gameResult) {
             broadcastClock()
             broadcastGameStatus()
@@ -393,16 +528,10 @@ io.on("connection", uniqueSocket => {
 
         if (!disconnectedColor) return
 
-        if (uniqueSocket.id === players.white) {
-            delete players.white
-        } else if (uniqueSocket.id === players.black) {
-            delete players.black
-        }
+        delete players[SEAT_KEYS[disconnectedColor]]
+        seatSockets[disconnectedColor] = null
 
         if (clock.running) {
-            // Bring the active clock up to date first. If time has already
-            // run out, end the game on time now instead of pausing, so a
-            // disconnect cannot delay or erase the timeout.
             syncClock()
 
             if (clock[clock.active] <= 0) {
@@ -416,8 +545,10 @@ io.on("connection", uniqueSocket => {
 
         if (drawOfferBy === disconnectedColor) {
             drawOfferBy = null
-            broadcastGameStatus()
         }
+
+        startPendingReset(disconnectedColor)
+        broadcastGameStatus()
     })
 })
 

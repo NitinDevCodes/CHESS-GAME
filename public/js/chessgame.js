@@ -1,4 +1,27 @@
-const socket = io()
+const getPlayerId = () => {
+    const generate = () => {
+        if (window.crypto && typeof window.crypto.randomUUID === "function") {
+            return window.crypto.randomUUID()
+        }
+
+        return `p-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}${Math.random().toString(36).slice(2)}`
+    }
+
+    try {
+        let id = window.sessionStorage.getItem("chessPlayerId")
+
+        if (!id) {
+            id = generate()
+            window.sessionStorage.setItem("chessPlayerId", id)
+        }
+
+        return id
+    } catch (error) {
+        return generate()
+    }
+}
+
+const socket = io({ query: { playerId: getPlayerId() } })
 const chess = new Chess()
 const boardElement = document.querySelector(".chessboard")
 const roleLabelElement = document.querySelector("#role-label")
@@ -25,9 +48,9 @@ let selectedMoves = []
 let gameResult = null
 let drawOfferBy = null
 let noticeText = ""
+let pendingReset = null
+let resetDeadline = null
 
-// Display-only copy of the server clock. The server is the only source of truth;
-// this is just used to count the active clock down smoothly between updates.
 let clockState = { w: 10 * 60 * 1000, b: 10 * 60 * 1000, running: false, active: null }
 let clockReceivedAt = performance.now()
 
@@ -100,6 +123,19 @@ const getStatusText = () => {
         return `${winner} wins — ${gameResult.reason}.`
     }
 
+    if (pendingReset) {
+        const seconds = Math.max(
+            0,
+            Math.ceil((resetDeadline - performance.now()) / 1000)
+        )
+
+        const who = pendingReset.colors.length > 1
+            ? "Both players have"
+            : `${pendingReset.colors[0] === "w" ? "Player 1 (White)" : "Player 2 (Black)"} has`
+
+        return `${who} disconnected. The game resets in ${seconds}s unless they reconnect.`
+    }
+
     if (drawOfferBy) {
         if (playerRole && playerRole === drawOfferBy) {
             return "Draw offer sent. Waiting for your opponent."
@@ -112,11 +148,11 @@ const getStatusText = () => {
         return `${drawOfferBy === "w" ? "White" : "Black"} has offered a draw.`
     }
 
+    if (noticeText) return noticeText
+
     if (!clockState.running) {
         return "Waiting for both players to connect. Clocks are paused."
     }
-
-    if (noticeText) return noticeText
 
     return `${chess.turn() === "w" ? "White" : "Black"} to move`
 }
@@ -381,6 +417,8 @@ socket.on("boardState", fen => {
 socket.on("clockUpdate", state => {
     const runningChanged = clockState.running !== state.running
 
+    if (runningChanged && state.running) noticeText = ""
+
     clockState = {
         w: state.w,
         b: state.b,
@@ -392,7 +430,6 @@ socket.on("clockUpdate", state => {
     renderClocks()
 
     if (runningChanged) {
-        // Dragging is only enabled while the clocks run.
         updateGameControls()
         renderBoard()
     } else {
@@ -403,6 +440,9 @@ socket.on("clockUpdate", state => {
 socket.on("gameStatus", status => {
     gameResult = status.result
     drawOfferBy = status.drawOfferBy
+
+    pendingReset = status.pendingReset || null
+    resetDeadline = pendingReset ? performance.now() + pendingReset.inMs : null
 
     if (gameResult || drawOfferBy) noticeText = ""
 
@@ -449,7 +489,12 @@ window.addEventListener("beforeunload", event => {
     }
 })
 
-setInterval(renderClocks, 200)
+setInterval(() => {
+    renderClocks()
+
+    // Keeps the reset countdown text ticking down.
+    if (pendingReset && !gameResult) updateGameStatus()
+}, 200)
 
 updateRoleDisplay()
 updateGameControls()
